@@ -17,6 +17,7 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
+    "vendor/**",
     "README.md",
     "LICENSE"
   ],
@@ -29,8 +30,5 @@
       "immediately": true,
       "inject": []
     }
-  },
-  "dependencies": {
-    "openhongguo": "^0.2.0"
   }
 }

@@ -13,7 +13,8 @@
 | 热播 | 总榜 / 真人 / 漫剧 / AI，每榜 5 页 × 20 部 |
 | 分类 | 真人剧 / 漫剧 / AI 剧 / 漫画，各约 800 部，24 部一页翻页 |
 | 搜索 | 按剧名搜索，分页加载 |
-| 播放器 | 内嵌 `<video>`，选集按 24 集折叠，可展开 |
+| 观看历史 | 面板顶部「发现 / 观看历史」两个等宽大切换按钮；历史页最多保留 100 部，网格展示，可单条删除 / 一键清空。记录每部剧看到第几集、第几秒，点一下从那集那秒接着播 |
+| 播放器 | 内嵌 `<video>`，选集按 24 集折叠，可展开；播完自动下一集（可关） |
 
 ## 全部集数是怎么来的
 
@@ -30,13 +31,20 @@
 
 ## 安装
 
+本副本是本地构建（`E:\test\hongguo-drama`），已通过 DSH 插件管理器以 `install_bundle` 链接进 profile：
+
 ```sh
-dsh plugin --profile <你的profile> add github:SuCriss/dsh-hongguo
+# 在 DSH 里：plugin_manager install_bundle target=E:\test\hongguo-drama
+# 或命令行：dsh plugin --profile <你的profile> add file:E:\test\hongguo-drama
 ```
 
-或在 DSH 插件市场里搜索「红果短剧」。
+`openhongguo` SDK 已随包 vendored（`vendor/openhongguo/`，含 `dist/openhongguo.wasm`），因此安装时不需要再拉任何 npm 依赖。安装后重启一次 DSH。左下角（Settings 上方）没有按钮，入口在**左侧栏上部**的面板图标行。
 
-安装后重启一次 DSH。左下角（Settings 上方）没有按钮，入口在**左侧栏上部**的面板图标行，最后一项。
+## 来源与致谢
+
+- 上游项目：[SuCriss/dsh-hongguo](https://github.com/SuCriss/dsh-hongguo)（MIT），本副本的 `index.js` / `client.js` / `cenc.js` 与其同源，差别仅在于把 `openhongguo` 依赖改为 vendored 引入，并补充了本节说明。
+- 数据与播放 SDK：[beilunyang/openhongguo](https://github.com/beilunyang/openhongguo)（Apache-2.0，`vendor/openhongguo/LICENSE` 与 `GO_LICENSE` 已随包保留）。
+
 
 ## 使用
 

@@ -46,6 +46,40 @@ window.__ModuleLoader__.load({
       return pending
     }
 
+    // --------------------------------------------------------------- history --
+    // One row per series: the last episode watched, where it stopped, and how far
+    // through the series that is. Local to this browser profile.
+    const HISTORY_KEY = 'hongguo-drama:history'
+    const HISTORY_LIMIT = 100
+
+    function readHistory() {
+      try {
+        const raw = localStorage.getItem(HISTORY_KEY)
+        const list = raw ? JSON.parse(raw) : []
+        return Array.isArray(list) ? list.filter((entry) => entry && entry.seriesId) : []
+      } catch {
+        return []
+      }
+    }
+
+    function writeHistory(list) {
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, HISTORY_LIMIT)))
+      } catch {
+        /* Storage unavailable: history stays in memory for this panel. */
+      }
+    }
+
+    /** Newest first, one entry per series. */
+    function mergeHistory(list, record) {
+      return [record].concat(list.filter((entry) => entry.seriesId !== record.seriesId)).slice(0, HISTORY_LIMIT)
+    }
+
+    function minutesOf(seconds) {
+      const total = Math.max(0, Math.round(Number(seconds) || 0))
+      return Math.floor(total / 60) + ':' + String(total % 60).padStart(2, '0')
+    }
+
     const CSS = `
 .hg-root{display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}
 .hg-head{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);flex:none}
@@ -106,6 +140,34 @@ window.__ModuleLoader__.load({
 .hg-stage video{display:block;width:100%;max-height:60vh;background:#000;object-fit:contain}
 .hg-lock{font-size:11.5px;line-height:1.55;color:var(--dsw-alias-label-secondary);padding:8px 10px;
   border-radius:9px;background:var(--dsw-alias-bg-layer-2);margin-bottom:6px}
+.hg-playbar{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.hg-playbar .hg-cmeta{flex:1;min-width:0}
+.hg-toggle{height:24px;padding:0 9px;border-radius:12px;border:1px solid var(--dsw-alias-border-l1);
+  background:transparent;color:var(--dsw-alias-label-secondary);font-size:11px;cursor:pointer;white-space:nowrap}
+.hg-toggle:hover{color:var(--dsw-alias-label-primary)}
+.hg-toggle[data-on="1"]{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
+.hg-hist{margin-bottom:12px}
+.hg-histhead{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;font-weight:600}
+.hg-histmore{margin-left:auto;border:none;background:none;color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:400;cursor:pointer}
+.hg-histmore:hover{color:var(--dsw-alias-label-primary)}
+.hg-histclear{border:none;background:none;color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:400;cursor:pointer}
+.hg-histclear:hover{color:var(--dsw-alias-label-primary)}
+.hg-histrow{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
+.hg-histitem{flex:none;width:92px;background:none;border:none;padding:0;text-align:left;cursor:pointer;color:inherit}
+.hg-histitem .hg-cover{aspect-ratio:3/4}
+.hg-histprog{height:3px;border-radius:2px;background:var(--dsw-alias-bg-layer-2);margin-top:4px;overflow:hidden}
+.hg-histprog i{display:block;height:100%;background:var(--dsw-alias-brand-primary)}
+.hg-hlist{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px}
+.hg-hitem{position:relative}
+.hg-hitem .hg-histitem{width:100%}
+.hg-del{position:absolute;right:2px;top:2px;width:18px;height:18px;padding:0;border-radius:9px;border:none;
+  background:rgba(0,0,0,.62);color:#fff;font-size:11px;line-height:18px;text-align:center;cursor:pointer;opacity:0}
+.hg-hitem:hover .hg-del{opacity:1}
+.hg-switch{display:flex;gap:6px;padding:8px 12px 0;flex:none}
+.hg-switchbtn{flex:1;height:32px;border-radius:9px;border:1px solid var(--dsw-alias-border-l1);
+  background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);font-size:12.5px;cursor:pointer}
+.hg-switchbtn:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l2)}
+.hg-switchbtn[data-active="1"]{background:var(--dsw-alias-brand-primary);border-color:transparent;color:#fff;font-weight:600}
 `
 
     function Icon(props) {
@@ -234,6 +296,64 @@ window.__ModuleLoader__.load({
       source === 'rank'
         ? '/rank?key=' + encodeURIComponent(rankKey) + '&page=' + page
         : '/browse?type=' + encodeURIComponent(source) + '&page=' + page
+
+    /** One "continue watching" card: resume at the recorded episode and second. */
+    function HistoryCard(props) {
+      const { entry, onResume } = props
+      const ratio = entry.duration > 0 ? Math.min(1, (Number(entry.position) || 0) / entry.duration) : 0
+      return h(
+        'button',
+        { className: 'hg-histitem', type: 'button', title: entry.title, onClick: () => onResume(entry) },
+        h(Cover, { src: entry.cover, label: '第 ' + (entry.index + 1) + ' 集' }),
+        h('div', { className: 'hg-cname' }, entry.title),
+        h('div', { className: 'hg-histprog' }, h('i', { style: { width: Math.round(ratio * 100) + '%' } })),
+        h(
+          'div',
+          { className: 'hg-cmeta' },
+          '第 ' + (entry.index + 1) + '/' + entry.count + ' 集' + (ratio > 0 ? ' · ' + minutesOf(entry.position) : ''),
+        ),
+      )
+    }
+
+    /** Full watch history: everything kept, newest first, one row per series. */
+    function HistoryView(props) {
+      const { history, onResume, onRemove, onClear } = props
+      return h(
+        'div',
+        null,
+        h(
+          'div',
+          { className: 'hg-histhead', style: { marginBottom: 10 } },
+          h('span', null, '观看历史 · 共 ' + history.length + ' 部'),
+          history.length > 0
+            ? h('button', { className: 'hg-histmore', type: 'button', onClick: onClear }, '清空全部')
+            : null,
+        ),
+        history.length === 0
+          ? h('div', { className: 'hg-empty' }, '还没有观看记录，回榜单挑一部吧。')
+          : h(
+              'div',
+              { className: 'hg-hlist' },
+              history.map((entry) =>
+                h(
+                  'div',
+                  { key: entry.seriesId, className: 'hg-hitem' },
+                  h(HistoryCard, { entry, onResume }),
+                  h(
+                    'button',
+                    {
+                      className: 'hg-del',
+                      type: 'button',
+                      title: '从历史中删除',
+                      onClick: () => onRemove(entry.seriesId),
+                    },
+                    '×',
+                  ),
+                ),
+              ),
+            ),
+      )
+    }
 
     function Home(props) {
       const { onOpen } = props
@@ -408,10 +528,11 @@ window.__ModuleLoader__.load({
     }
 
     function Detail(props) {
-      const { seriesId, onPlay, onBack } = props
+      const { seriesId, onPlay, onBack, resume } = props
       const [series, setSeries] = useState(null)
       const [episodes, setEpisodes] = useState([])
       const [error, setError] = useState('')
+      const resumed = useRef(false)
 
       useEffect(() => {
         let live = true
@@ -433,6 +554,15 @@ window.__ModuleLoader__.load({
           live = false
         }
       }, [seriesId])
+
+      // Coming from 继续观看: jump straight to the recorded episode and second.
+      useEffect(() => {
+        if (!resume || resumed.current) return
+        if (!series || episodes.length === 0) return
+        resumed.current = true
+        const at = Math.min(Math.max(Number(resume.index) || 0, 0), episodes.length - 1)
+        onPlay(series, episodes, at, Number(resume.time) || 0)
+      }, [resume, series, episodes, onPlay])
 
       if (error) return h('div', { className: 'hg-err' }, '加载失败：' + error)
       if (!series) return h('div', { className: 'hg-empty' }, '正在加载剧集…')
@@ -474,14 +604,88 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** Auto-advance preference outlives the panel; default on. */
+    const AUTONEXT_KEY = 'hongguo-drama:autonext'
+
+    function readAutoNext() {
+      try {
+        return localStorage.getItem(AUTONEXT_KEY) !== '0'
+      } catch {
+        return true
+      }
+    }
+
     function Player(props) {
-      const { series, episodes, index, onSelect, onBack } = props
+      const { series, episodes, index, onSelect, onBack, startTime, onProgress } = props
       const [failed, setFailed] = useState(false)
+      const [autoNext, setAutoNext] = useState(readAutoNext)
+      const [finished, setFinished] = useState(false)
       const episode = episodes[index]
+      const hasNext = index + 1 < episodes.length
 
       useEffect(() => {
         setFailed(false)
+        setFinished(false)
       }, [episode?.id])
+
+      const toggleAutoNext = useCallback(() => {
+        setAutoNext((value) => {
+          const next = !value
+          try {
+            localStorage.setItem(AUTONEXT_KEY, next ? '1' : '0')
+          } catch {
+            /* Private mode: the choice lasts for this panel only. */
+          }
+          return next
+        })
+      }, [])
+
+      /** Roll into the next episode; picking it re-mounts <video> with autoPlay. */
+      const handleEnded = useCallback(() => {
+        setFinished(true)
+        if (!autoNext || !hasNext) return
+        onSelect(series, episodes, index + 1)
+      }, [autoNext, hasNext, onSelect, series, episodes, index])
+
+      /** Resume from 继续观看: seek once the duration is known. */
+      const handleLoadedMetadata = useCallback(
+        (event) => {
+          const video = event.currentTarget
+          const target = Number(startTime) || 0
+          if (target <= 0 || !Number.isFinite(video.duration)) return
+          if (target >= video.duration - 2) return
+          try {
+            video.currentTime = target
+          } catch {
+            /* Some decoders refuse an early seek; playback simply starts at 0. */
+          }
+        },
+        [startTime],
+      )
+
+      /** Write the watch position at most every 5s, and immediately on pause. */
+      const lastSaved = useRef(0)
+      const saveProgress = useCallback(
+        (event) => {
+          if (!onProgress || !episode) return
+          const video = event.currentTarget
+          if (!Number.isFinite(video.currentTime)) return
+          const now = Date.now()
+          if (event.type === 'timeupdate' && now - lastSaved.current < 5000) return
+          lastSaved.current = now
+          onProgress({
+            seriesId: series.seriesId,
+            title: series.title,
+            cover: series.cover,
+            index,
+            episodeId: episode.id,
+            count: episodes.length,
+            position: video.currentTime,
+            duration: Number.isFinite(video.duration) ? video.duration : 0,
+          })
+        },
+        [onProgress, series, index, episode, episodes.length],
+      )
 
       if (!episode) return h('div', { className: 'hg-empty' }, '正在获取分集…')
 
@@ -491,8 +695,19 @@ window.__ModuleLoader__.load({
         h('button', { className: 'hg-back', type: 'button', onClick: onBack }, '← 返回剧集'),
         h(
           'div',
-          { className: 'hg-cmeta', style: { marginBottom: 8 } },
-          series.title + ' · 第 ' + (index + 1) + ' 集',
+          { className: 'hg-playbar' },
+          h('span', { className: 'hg-cmeta' }, series.title + ' · 第 ' + (index + 1) + ' / ' + episodes.length + ' 集'),
+          h(
+            'button',
+            {
+              className: 'hg-toggle',
+              type: 'button',
+              'data-on': autoNext ? '1' : '0',
+              onClick: toggleAutoNext,
+              title: '播完自动播放下一集',
+            },
+            autoNext ? '连播：开' : '连播：关',
+          ),
         ),
         h(
           'div',
@@ -505,6 +720,10 @@ window.__ModuleLoader__.load({
             playsInline: true,
             poster: series.cover,
             onError: () => setFailed(true),
+            onEnded: handleEnded,
+            onLoadedMetadata: handleLoadedMetadata,
+            onTimeUpdate: saveProgress,
+            onPause: saveProgress,
           }),
         ),
         failed
@@ -513,6 +732,12 @@ window.__ModuleLoader__.load({
               { className: 'hg-lock', style: { marginTop: 8 } },
               '这一集没能解出片源，换一集试试（首次播放需要解密，约几秒）。',
             )
+          : null,
+        finished && !hasNext
+          ? h('div', { className: 'hg-lock', style: { marginTop: 8 } }, '已经是最后一集了。')
+          : null,
+        finished && hasNext && !autoNext
+          ? h('div', { className: 'hg-lock', style: { marginTop: 8 } }, '连播已关闭：点右上「连播：关」开启，或直接选集。')
           : null,
         h('div', { className: 'hg-sec' }, '选集 · 共 ' + episodes.length + ' 集'),
         h(EpisodeGrid, {
@@ -527,12 +752,47 @@ window.__ModuleLoader__.load({
       const [route, setRoute] = useState({ name: 'home' })
       const [query, setQuery] = useState('')
       const [draft, setDraft] = useState('')
+      const [history, setHistory] = useState(readHistory)
 
       const openSeries = useCallback((item) => {
-        setRoute({ name: 'detail', seriesId: item.seriesId })
+        setRoute((prev) => ({
+          name: 'detail',
+          seriesId: item.seriesId,
+          from: prev.name === 'detail' || prev.name === 'player' ? prev.from ?? 'home' : prev.name,
+        }))
       }, [])
-      const openEpisode = useCallback((series, episodes, index) => {
-        setRoute({ name: 'player', series, episodes, index })
+      const openEpisode = useCallback((series, episodes, index, startTime) => {
+        setRoute((prev) => ({
+          name: 'player',
+          series,
+          episodes,
+          index,
+          startTime: Number(startTime) || 0,
+          from: prev.from ?? 'home',
+        }))
+      }, [])
+      /** 继续观看: open the series, then let Detail jump to the saved episode. */
+      const resumeEntry = useCallback((entry) => {
+        setRoute((prev) => ({
+          name: 'detail',
+          seriesId: entry.seriesId,
+          resume: { index: Number(entry.index) || 0, time: Number(entry.position) || 0 },
+          from: prev.name === 'history' ? 'history' : 'home',
+        }))
+      }, [])
+      const remember = useCallback((record) => {
+        const next = mergeHistory(readHistory(), record)
+        writeHistory(next)
+        setHistory(next)
+      }, [])
+      const clearHistory = useCallback(() => {
+        writeHistory([])
+        setHistory([])
+      }, [])
+      const removeEntry = useCallback((seriesId) => {
+        const next = readHistory().filter((entry) => entry.seriesId !== seriesId)
+        writeHistory(next)
+        setHistory(next)
       }, [])
       const submit = useCallback(
         (event) => {
@@ -566,26 +826,57 @@ window.__ModuleLoader__.load({
             h('button', { className: 'hg-btn', type: 'submit', 'data-primary': '1' }, '搜索'),
           ),
         ),
+        route.name === 'home' || route.name === 'history'
+          ? h(
+              'div',
+              { className: 'hg-switch' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'hg-switchbtn',
+                  'data-active': route.name === 'home' ? '1' : '0',
+                  onClick: () => setRoute({ name: 'home' }),
+                },
+                '发现',
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'hg-switchbtn',
+                  'data-active': route.name === 'history' ? '1' : '0',
+                  onClick: () => setRoute({ name: 'history' }),
+                },
+                '观看历史' + (history.length ? ' · ' + history.length : ''),
+              ),
+            )
+          : null,
         h(
           'div',
           { className: 'hg-body' },
-          route.name === 'home'
-            ? h(Home, { onOpen: openSeries })
+          route.name === 'history'
+            ? h(HistoryView, { history, onResume: resumeEntry, onRemove: removeEntry, onClear: clearHistory })
             : route.name === 'search'
               ? h(Search, { query, onOpen: openSeries })
               : route.name === 'detail'
                 ? h(Detail, {
                     seriesId: route.seriesId,
+                    resume: route.resume ?? null,
                     onPlay: openEpisode,
-                    onBack: () => setRoute({ name: 'home' }),
+                    onBack: () => setRoute({ name: route.from ?? 'home' }),
                   })
-                : h(Player, {
-                    series: route.series,
-                    episodes: route.episodes ?? [],
-                    index: route.index,
-                    onSelect: openEpisode,
-                    onBack: () => setRoute({ name: 'detail', seriesId: route.series.seriesId }),
-                  }),
+                : route.name === 'player'
+                  ? h(Player, {
+                      series: route.series,
+                      episodes: route.episodes ?? [],
+                      index: route.index,
+                      startTime: route.startTime ?? 0,
+                      onProgress: remember,
+                      onSelect: openEpisode,
+                      onBack: () => setRoute({ name: 'detail', seriesId: route.series.seriesId, from: route.from }),
+                    })
+                  : h(Home, { onOpen: openSeries }),
         ),
       )
     }

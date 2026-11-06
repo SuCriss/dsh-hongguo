@@ -14,7 +14,8 @@ import { createReadStream } from 'node:fs'
 import { mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { createClient } from 'openhongguo'
+// Vendored so the bundle carries no install-time dependency; see vendor/openhongguo.
+import { createClient } from './vendor/openhongguo/index.js'
 import { decryptInPlace } from './cenc.js'
 
 const ORIGIN = 'https://hongguoduanju.com'
