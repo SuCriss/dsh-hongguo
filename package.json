@@ -1,0 +1,36 @@
+{
+  "name": "hongguo-drama",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "红果短剧：左侧栏入口，右侧栏看热播榜、浏览全部片库并播放全部集数（本地解密）。",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cenc.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "dependencies": {
+    "openhongguo": "^0.2.0"
+  }
+}
