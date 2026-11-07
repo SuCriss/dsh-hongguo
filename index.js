@@ -229,20 +229,46 @@ async function loadDetail(seriesId) {
   return { series }
 }
 
+/** A tag slug is used as a path segment, so hold it to the shape the site emits. */
+const TAG_SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/
+
 /**
- * One page of a category listing. The homepage only ships nine cards per ranking;
- * `/category/<type>?page=N` carries 24 per page and runs to roughly 800 series.
+ * The filter panel a category page renders: one row of genre chips. The site exposes
+ * these only inside the SSR payload as `selectorList`, so the panel is read from there
+ * and the chips are addressed by slug, for example `/category/real-drama/romance`.
  */
-async function loadBrowse(type, page) {
+async function loadCategories(type) {
   if (!CATEGORY_TYPES.has(type)) throw new Error('unknown category ' + type)
-  const result = await fetchTextStatus('/category/' + type + '?page=' + page)
+  const html = await fetchText('/category/' + type)
+  const rows = extractJson(html, 'selectorList') ?? []
+  const groups = rows.map((row) => ({
+    id: String(row.row_id ?? ''),
+    name: row.row_name ?? '',
+    items: (row.items ?? [])
+      .filter((item) => TAG_SLUG.test(String(item.selector_item_id ?? '')))
+      .map((item) => ({ slug: String(item.selector_item_id), name: item.show_name ?? '' })),
+  }))
+  return { groups: groups.filter((group) => group.items.length > 0) }
+}
+
+/**
+ * One page of a category listing, optionally narrowed to a genre chip. The homepage only
+ * ships nine cards per ranking; `/category/<type>[/<tag>]?page=N` carries 24 per page and
+ * runs to roughly 800 series.
+ */
+async function loadBrowse(type, page, tag) {
+  if (!CATEGORY_TYPES.has(type)) throw new Error('unknown category ' + type)
+  const slug = tag ? String(tag) : ''
+  if (slug !== '' && !TAG_SLUG.test(slug)) throw new Error('bad tag ' + slug)
+  const path = '/category/' + type + (slug ? '/' + slug : '') + '?page=' + page
+  const result = await fetchTextStatus(path)
   if (!result.ok) {
-    if (result.status === 404) return { items: [], hasMore: false, page }
+    if (result.status === 404) return { items: [], hasMore: false, page, tag: slug }
     throw new Error('hongguo category answered ' + result.status)
   }
   const list = extractJson(result.text, 'recommendList') ?? []
   const items = list.map(shapeSeries).filter((series) => series && series.seriesId)
-  return { items, hasMore: items.length >= PER_CATEGORY_PAGE, page }
+  return { items, hasMore: items.length >= PER_CATEGORY_PAGE, page, tag: slug }
 }
 
 /** Project one ranking row onto what the panel renders. */
@@ -436,13 +462,24 @@ async function route(request, response) {
         await cached('detail:' + seriesId, TTL.detail, () => loadDetail(seriesId)),
       )
     }
-    if (path === '/browse') {
-      const page = Math.max(Number(url.searchParams.get('page') ?? 1) || 1, 1)
+    if (path === '/categories') {
       const type = url.searchParams.get('type') ?? ''
       return sendJson(
         response,
         200,
-        await cached('browse:' + type + ':' + page, TTL.list, () => loadBrowse(type, page)),
+        await cached('categories:' + type, TTL.detail, () => loadCategories(type)),
+      )
+    }
+    if (path === '/browse') {
+      const page = Math.max(Number(url.searchParams.get('page') ?? 1) || 1, 1)
+      const type = url.searchParams.get('type') ?? ''
+      const tag = url.searchParams.get('tag') ?? ''
+      return sendJson(
+        response,
+        200,
+        await cached('browse:' + type + ':' + tag + ':' + page, TTL.list, () =>
+          loadBrowse(type, page, tag),
+        ),
       )
     }
     if (path === '/rank') {

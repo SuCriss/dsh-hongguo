@@ -98,8 +98,9 @@ window.__ModuleLoader__.load({
 .hg-tab{height:26px;padding:0 10px;border-radius:13px;border:1px solid var(--dsw-alias-border-l1);
   background:transparent;color:var(--dsw-alias-label-secondary);font-size:11.5px;cursor:pointer}
 .hg-tab[data-active="1"]{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l2)}
-.hg-subs{display:flex;gap:8px;margin:-2px 0 10px;padding-left:2px;flex-wrap:wrap}
-.hg-sub{border:none;background:none;padding:0;font-size:11px;color:var(--dsw-alias-label-secondary);cursor:pointer}
+.hg-subs{display:flex;gap:7px 8px;margin:-2px 0 10px;padding:0 2px 2px 2px;flex-wrap:wrap;
+  max-height:58px;overflow-y:auto}
+.hg-sub{border:none;background:none;padding:0;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary);cursor:pointer;white-space:nowrap}
 .hg-sub:hover{color:var(--dsw-alias-label-primary)}
 .hg-sub[data-active="1"]{color:var(--dsw-alias-brand-primary);font-weight:600}
 .hg-more{display:flex;justify-content:center;margin-top:14px}
@@ -292,10 +293,22 @@ window.__ModuleLoader__.load({
       { key: 'hot-ai-drama', name: 'AI' },
     ]
 
-    const listUrl = (source, rankKey, page) =>
+    const listUrl = (source, sub, page) =>
       source === 'rank'
-        ? '/rank?key=' + encodeURIComponent(rankKey) + '&page=' + page
-        : '/browse?type=' + encodeURIComponent(source) + '&page=' + page
+        ? '/rank?key=' + encodeURIComponent(sub || 'hot-drama') + '&page=' + page
+        : '/browse?type=' + encodeURIComponent(source) +
+          (sub ? '&tag=' + encodeURIComponent(sub) : '') +
+          '&page=' + page
+
+    /** The chips shown under a source: ranking boards, or the category's genre filter. */
+    const subItemsOf = (source, categories) => {
+      if (source === 'rank') return RANKS
+      const group = categories[source]?.[0]
+      if (!group) return []
+      return [{ key: '', name: '全部' }].concat(
+        group.items.map((item) => ({ key: item.slug, name: item.name })),
+      )
+    }
 
     /** One "continue watching" card: resume at the recorded episode and second. */
     function HistoryCard(props) {
@@ -358,13 +371,33 @@ window.__ModuleLoader__.load({
     function Home(props) {
       const { onOpen } = props
       const [source, setSource] = useState('rank')
-      const [rankKey, setRankKey] = useState('hot-drama')
+      const [sub, setSub] = useState('hot-drama')
+      const [categories, setCategories] = useState({})
       const [items, setItems] = useState([])
       const [page, setPage] = useState(1)
       const [hasMore, setHasMore] = useState(false)
       const [loading, setLoading] = useState(true)
       const [moreLoading, setMoreLoading] = useState(false)
       const [error, setError] = useState('')
+
+      // Genre chips come from the category page's own filter panel.
+      useEffect(() => {
+        if (source === 'rank' || categories[source]) return
+        let live = true
+        getJson('/categories?type=' + encodeURIComponent(source))
+          .then((payload) => {
+            if (live) setCategories((prev) => ({ ...prev, [source]: payload.groups ?? [] }))
+          })
+          .catch(() => {})
+        return () => {
+          live = false
+        }
+      }, [source, categories])
+
+      const switchSource = useCallback((next) => {
+        setSource(next)
+        setSub(next === 'rank' ? 'hot-drama' : '')
+      }, [])
 
       useEffect(() => {
         let live = true
@@ -373,7 +406,7 @@ window.__ModuleLoader__.load({
         setItems([])
         setPage(1)
         setHasMore(false)
-        getJson(listUrl(source, rankKey, 1))
+        getJson(listUrl(source, sub, 1))
           .then((payload) => {
             if (!live) return
             setItems(payload.items ?? [])
@@ -384,13 +417,13 @@ window.__ModuleLoader__.load({
         return () => {
           live = false
         }
-      }, [source, rankKey])
+      }, [source, sub])
 
       const loadMore = useCallback(() => {
         if (moreLoading) return
         const next = page + 1
         setMoreLoading(true)
-        getJson(listUrl(source, rankKey, next))
+        getJson(listUrl(source, sub, next))
           .then((payload) => {
             setItems((prev) => prev.concat(payload.items ?? []))
             setHasMore(Boolean(payload.hasMore))
@@ -398,7 +431,9 @@ window.__ModuleLoader__.load({
           })
           .catch((cause) => setError(String(cause?.message ?? cause)))
           .finally(() => setMoreLoading(false))
-      }, [moreLoading, page, source, rankKey])
+      }, [moreLoading, page, source, sub])
+
+      const subItems = subItemsOf(source, categories)
 
       return h(
         'div',
@@ -414,25 +449,25 @@ window.__ModuleLoader__.load({
                 type: 'button',
                 className: 'hg-tab',
                 'data-active': source === each.id ? '1' : '0',
-                onClick: () => setSource(each.id),
+                onClick: () => switchSource(each.id),
               },
               each.name,
             ),
           ),
         ),
-        source === 'rank'
+        subItems.length > 1
           ? h(
               'div',
               { className: 'hg-subs' },
-              RANKS.map((each) =>
+              subItems.map((each) =>
                 h(
                   'button',
                   {
-                    key: each.key,
+                    key: each.key || 'all',
                     type: 'button',
                     className: 'hg-sub',
-                    'data-active': rankKey === each.key ? '1' : '0',
-                    onClick: () => setRankKey(each.key),
+                    'data-active': sub === each.key ? '1' : '0',
+                    onClick: () => setSub(each.key),
                   },
                   each.name,
                 ),
