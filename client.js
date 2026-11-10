@@ -698,6 +698,10 @@ window.__ModuleLoader__.load({
       const [definitions, setDefinitions] = useState([])
       const episode = episodes[index]
       const hasNext = index + 1 < episodes.length
+      const videoRef = useRef(null)
+      // A fullscreen <video> is destroyed when its key changes, so remember the state
+      // across the auto-advance and re-request it once the next episode mounts.
+      const keepFullscreen = useRef(false)
 
       useEffect(() => {
         setFailed(false)
@@ -745,6 +749,10 @@ window.__ModuleLoader__.load({
       /** Roll into the next episode; picking it re-mounts <video> with autoPlay. */
       const handleEnded = useCallback(() => {
         setFinished(true)
+        // Record fullscreen before the advancing <video> unmounts and loses it.
+        keepFullscreen.current =
+          Boolean(document.fullscreenElement) &&
+          document.fullscreenElement === videoRef.current
         if (!autoNext || !hasNext) return
         onSelect(series, episodes, index + 1)
       }, [autoNext, hasNext, onSelect, series, episodes, index])
@@ -764,6 +772,20 @@ window.__ModuleLoader__.load({
         },
         [startTime],
       )
+
+      /** Re-enter fullscreen after an auto-advance that remounted the <video>. */
+      const handleLoadedData = useCallback(() => {
+        if (!keepFullscreen.current) return
+        keepFullscreen.current = false
+        const video = videoRef.current
+        if (!video) return
+        try {
+          if (video.requestFullscreen) video.requestFullscreen()
+          else if (video.webkitRequestFullscreen) video.webkitRequestFullscreen()
+        } catch {
+          /* Browser refused a programmatic fullscreen; stay inline. */
+        }
+      }, [])
 
       /** Write the watch position at most every 5s, and immediately on pause. */
       const lastSaved = useRef(0)
@@ -828,6 +850,7 @@ window.__ModuleLoader__.load({
           { className: 'hg-stage' },
           h('video', {
             key: episode.id + ':' + definition,
+            ref: videoRef,
             src: API + '/media?episode_id=' + episode.id + '&definition=' + encodeURIComponent(definition),
             controls: true,
             autoPlay: true,
@@ -836,6 +859,7 @@ window.__ModuleLoader__.load({
             onError: () => setFailed(true),
             onEnded: handleEnded,
             onLoadedMetadata: handleLoadedMetadata,
+            onLoadedData: handleLoadedData,
             onTimeUpdate: saveProgress,
             onPause: saveProgress,
           }),
