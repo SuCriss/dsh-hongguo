@@ -699,9 +699,12 @@ window.__ModuleLoader__.load({
       const episode = episodes[index]
       const hasNext = index + 1 < episodes.length
       const videoRef = useRef(null)
-      // A fullscreen <video> is destroyed when its key changes, so remember the state
-      // across the auto-advance and re-request it once the next episode mounts.
-      const keepFullscreen = useRef(false)
+      // The <video> element stays mounted across episodes and quality switches, so a
+      // native fullscreen session survives the change: fullscreen is bound to the
+      // element, not to its source. Re-requesting it from script cannot work, because
+      // browsers reject requestFullscreen() without a user gesture.
+      const resumePending = useRef(true)
+      const wasFullscreen = useRef(false)
 
       useEffect(() => {
         setFailed(false)
@@ -746,20 +749,18 @@ window.__ModuleLoader__.load({
         })
       }, [])
 
-      /** Roll into the next episode; picking it re-mounts <video> with autoPlay. */
+      /** Roll into the next episode; the same <video> element is re-pointed. */
       const handleEnded = useCallback(() => {
         setFinished(true)
-        // Record fullscreen before the advancing <video> unmounts and loses it.
-        keepFullscreen.current =
-          Boolean(document.fullscreenElement) &&
-          document.fullscreenElement === videoRef.current
         if (!autoNext || !hasNext) return
         onSelect(series, episodes, index + 1)
       }, [autoNext, hasNext, onSelect, series, episodes, index])
 
-      /** Resume from 继续观看: seek once the duration is known. */
+      /** Resume from 继续观看 once, on the first metadata of this player. */
       const handleLoadedMetadata = useCallback(
         (event) => {
+          if (!resumePending.current) return
+          resumePending.current = false
           const video = event.currentTarget
           const target = Number(startTime) || 0
           if (target <= 0 || !Number.isFinite(video.duration)) return
@@ -773,17 +774,52 @@ window.__ModuleLoader__.load({
         [startTime],
       )
 
-      /** Re-enter fullscreen after an auto-advance that remounted the <video>. */
-      const handleLoadedData = useCallback(() => {
-        if (!keepFullscreen.current) return
-        keepFullscreen.current = false
+      /** Point the mounted element at the new source and keep playing. */
+      const appliedSource = useRef(null)
+      useEffect(() => {
         const video = videoRef.current
-        if (!video) return
+        if (!video || !episode) return
+        const key = episode.id + ':' + definition
+        if (appliedSource.current === null) {
+          // First mount: the src attribute and autoPlay already did the work.
+          appliedSource.current = key
+          return
+        }
+        if (appliedSource.current === key) return
+        appliedSource.current = key
+        try {
+          video.load()
+        } catch {
+          /* Attribute change already triggered a load. */
+        }
+        const play = video.play()
+        if (play && typeof play.catch === 'function') play.catch(() => {})
+        // Best effort for engines that still drop fullscreen on a source change.
+        if (!wasFullscreen.current) return
+        const stillFull =
+          document.fullscreenElement === video || video.webkitDisplayingFullscreen === true
+        if (stillFull) return
         try {
           if (video.requestFullscreen) video.requestFullscreen()
           else if (video.webkitRequestFullscreen) video.webkitRequestFullscreen()
         } catch {
-          /* Browser refused a programmatic fullscreen; stay inline. */
+          /* Outside a user gesture: stay inline until the next click. */
+        }
+      }, [episode?.id, definition])
+
+      /** Remember whether the player itself is the fullscreen element. */
+      useEffect(() => {
+        const sync = () => {
+          const video = videoRef.current
+          wasFullscreen.current = Boolean(
+            video && (document.fullscreenElement === video || video.webkitDisplayingFullscreen === true),
+          )
+        }
+        document.addEventListener('fullscreenchange', sync)
+        document.addEventListener('webkitfullscreenchange', sync)
+        return () => {
+          document.removeEventListener('fullscreenchange', sync)
+          document.removeEventListener('webkitfullscreenchange', sync)
         }
       }, [])
 
@@ -849,7 +885,6 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'hg-stage' },
           h('video', {
-            key: episode.id + ':' + definition,
             ref: videoRef,
             src: API + '/media?episode_id=' + episode.id + '&definition=' + encodeURIComponent(definition),
             controls: true,
@@ -859,7 +894,6 @@ window.__ModuleLoader__.load({
             onError: () => setFailed(true),
             onEnded: handleEnded,
             onLoadedMetadata: handleLoadedMetadata,
-            onLoadedData: handleLoadedData,
             onTimeUpdate: saveProgress,
             onPause: saveProgress,
           }),
