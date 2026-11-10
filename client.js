@@ -16,19 +16,27 @@ window.__ModuleLoader__.load({
 
     const KIND = 'hongguo-drama'
     const API = '/hongguo-drama/api'
-    const CDN = 'https://hongguoduanju.com'
-
-    /** Public 360p rendition for one episode id. */
-    const mp4Of = (vid) => CDN + '/video/public/' + vid + '/360p.mp4'
 
     /** Responses stay warm in the panel so switching tabs or going back is instant. */
     const CLIENT_TTL = 90 * 1000
+    const CLIENT_CACHE_LIMIT = 200
     const clientCache = new Map()
 
     function getJson(path, ttl = CLIENT_TTL) {
       const now = Date.now()
       const hit = clientCache.get(path)
       if (hit && now - hit.at < ttl) return hit.value
+      if (clientCache.size >= CLIENT_CACHE_LIMIT) {
+        let oldestKey = null
+        let oldestAt = Infinity
+        for (const [key, entry] of clientCache) {
+          if (entry.at < oldestAt) {
+            oldestAt = entry.at
+            oldestKey = key
+          }
+        }
+        if (oldestKey !== null) clientCache.delete(oldestKey)
+      }
       const pending = fetch(API + path).then(async (response) => {
         let payload
         try {
@@ -507,6 +515,7 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState('')
       const [loading, setLoading] = useState(true)
       const [page, setPage] = useState(1)
+      const [moreLoading, setMoreLoading] = useState(false)
 
       useEffect(() => {
         let live = true
@@ -526,18 +535,21 @@ window.__ModuleLoader__.load({
       }, [query])
 
       const more = useCallback(() => {
+        if (moreLoading) return
         const next = page + 1
-        setPage(next)
+        setMoreLoading(true)
         getJson('/search?q=' + encodeURIComponent(query) + '&page=' + next)
-          .then((payload) =>
+          .then((payload) => {
             setState((prev) => ({
               items: prev.items.concat(payload.items ?? []),
               hasMore: Boolean(payload.hasMore),
               total: payload.total ?? prev.total,
-            })),
-          )
+            }))
+            setPage(next)
+          })
           .catch((cause) => setError(String(cause?.message ?? cause)))
-      }, [page, query])
+          .finally(() => setMoreLoading(false))
+      }, [moreLoading, page, query])
 
       if (loading) return h('div', { className: 'hg-empty' }, '正在搜索「' + query + '」…')
       if (error) return h('div', { className: 'hg-err' }, '搜索失败：' + error)
@@ -556,7 +568,16 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               { style: { textAlign: 'center', marginTop: 14 } },
-              h('button', { className: 'hg-btn', type: 'button', onClick: more }, '加载更多'),
+              h(
+                'button',
+                {
+                  className: 'hg-btn',
+                  type: 'button',
+                  disabled: moreLoading,
+                  onClick: more,
+                },
+                moreLoading ? '加载中…' : '加载更多',
+              ),
             )
           : null,
       )

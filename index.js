@@ -95,30 +95,12 @@ function extractJson(text, key) {
   return undefined
 }
 
-/** The public 360p rendition players on the site build from a video id. */
-const mp4Of = (vid) => ORIGIN + '/video/public/' + vid + '/360p.mp4'
-
-/** True when the site will serve this episode's public rendition. */
-async function isPlayable(vid) {
-  try {
-    const response = await fetch(mp4Of(vid), {
-      method: 'HEAD',
-      headers: { 'user-agent': UA, referer: ORIGIN + '/' },
-      signal: AbortSignal.timeout(12000),
-    })
-    return response.ok
-  } catch {
-    return false
-  }
-}
-
 /** How long each loader result stays warm; boards and listings move slowly. */
 const TTL = {
   rank: 5 * 60 * 1000,
   list: 5 * 60 * 1000,
   search: 3 * 60 * 1000,
   detail: 10 * 60 * 1000,
-  probe: 10 * 60 * 1000,
 }
 
 /** Mobile identity the media CDN accepts; the desktop UA is refused on some edges. */
@@ -181,9 +163,7 @@ function shapeSeries(record) {
         : [],
     episodeCount: Number(record.episode_cnt ?? 0),
     episodeLabel: record.episode_right_text ?? '',
-    accessible: Number(record.accessible_episode_cnt ?? 0),
     hot: record.hot_score_data?.text ?? '',
-    vids: Array.isArray(record.vid_list) ? record.vid_list.map(String) : [],
   }
 }
 
@@ -197,18 +177,7 @@ function sendJson(res, status, value) {
   res.end(body)
 }
 
-/** Homepage carousels: 热播短剧 / 热播真人剧 / 热播漫剧 / 热播AI剧. */
-async function loadHome() {
-  const html = await fetchText('/')
-  const sections = extractJson(html, 'homeSections') ?? []
-  return {
-    sections: sections.map((section) => ({
-      type: section.tab_type ?? '',
-      name: section.tab_name ?? '',
-      items: (section.video_list ?? []).map(shapeSeries).filter(Boolean),
-    })),
-  }
-}
+/** Homepage carousels are superseded by `/rank` crawler boards; kept off the wire. */
 
 async function loadSearch(query, page) {
   const path =
@@ -281,9 +250,7 @@ function shapeRankRow(row) {
     tags: Array.isArray(row.tags) ? row.tags : [],
     episodeCount: Number(row.episodeCount ?? 0),
     episodeLabel: row.episodeCount ? '全' + row.episodeCount + '集' : '',
-    accessible: Number(row.openEpisodeCount ?? 0),
     hot: row.heatText || row.scoreText || row.favoriteText || '',
-    vids: Array.isArray(row.episodeVids) ? row.episodeVids.map(String) : [],
     rank: Number(row.rank ?? 0),
   }
 }
@@ -310,16 +277,6 @@ async function loadRank(slug, page) {
   }
 }
 
-/** Probe the first `count` episodes; the site locks the rest behind the app. */
-async function probePlayable(seriesId, count) {  const html = await fetchText('/detail?series_id=' + encodeURIComponent(seriesId))
-  const detail = extractJson(html, 'seriesDetail')
-  const vids = (detail?.vid_list ?? []).slice(0, count).map(String)
-  const verdicts = await Promise.all(vids.map(isPlayable))
-  return {
-    episodes: vids.map((vid, index) => ({ index: index + 1, vid, playable: verdicts[index] })),
-  }
-}
-
 // ------------------------------------------------------------------ SDK playback
 
 let sdkPromise = null
@@ -338,14 +295,22 @@ function sdk() {
   return sdkPromise
 }
 
-/** Resolve a playback model, swapping the anonymous device when the service withholds it. */
+/** Device errors the SDK says a fresh anonymous device may clear. */
+const DEVICE_RETRY_CODES = new Set(['ANONYMOUS_LIMITED', 'DEVICE_REJECTED'])
+/** Transient service errors worth one short retry before surfacing. */
+const TRANSIENT_CODES = new Set(['RATE_LIMITED'])
+
+/**
+ * Resolve a playback model. An empty or rejected anonymous device gets one swap;
+ * a rate limit gets one brief wait; anything else surfaces untouched.
+ */
 async function resolvePlaybackModel(episodeId) {
   const client = await sdk()
   let result = null
   try {
     result = await client.resolvePlayback(episodeId)
   } catch (error) {
-    if (error?.code !== 'ANONYMOUS_LIMITED') throw error
+    if (!DEVICE_RETRY_CODES.has(error?.code)) throw error
     await client.resetDevice()
     result = await client.resolvePlayback(episodeId)
   }
@@ -355,6 +320,17 @@ async function resolvePlaybackModel(episodeId) {
   }
   if (!result?.playback?.streams?.length) throw new Error('no playable stream')
   return result
+}
+
+/** One brief pause before retrying a rate-limited request. */
+async function retryResolve(episodeId) {
+  try {
+    return await resolvePlaybackModel(episodeId)
+  } catch (error) {
+    if (!TRANSIENT_CODES.has(error?.code)) throw error
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    return resolvePlaybackModel(episodeId)
+  }
 }
 
 /** Prefer 360p: it is the smallest rendition that stays readable at sidebar width. */
@@ -398,28 +374,34 @@ async function ensureMedia(episodeId) {
 
   return cached('media:' + episodeId, 30 * 60 * 1000, async () => {
     await mkdir(MEDIA_DIR, { recursive: true })
-    const { playback, contentKey } = await resolvePlaybackModel(episodeId)
-    const stream = pickStream(playback.streams, '360p')
-    const response = await fetch(stream.url, {
-      headers: { 'user-agent': MOBILE_UA },
-      signal: AbortSignal.timeout(90000),
-    })
-    if (!response.ok) throw new Error('media fetch answered ' + response.status)
-    const raw = Buffer.from(await response.arrayBuffer())
-
-    let output = raw
-    if (playback.protected) {
-      if (!contentKey?.key) {
-        throw new Error('content key unavailable: ' + (contentKey?.error?.code ?? 'unknown'))
-      }
-      output = decryptInPlace(raw, contentKey.key).buffer
-    }
-
     const temp = file + '.part'
-    await writeFile(temp, output)
-    await rename(temp, file)
-    pruneMedia().catch(() => {})
-    return file
+    try {
+      const { playback, contentKey } = await retryResolve(episodeId)
+      const stream = pickStream(playback.streams, '360p')
+      const response = await fetch(stream.url, {
+        headers: { 'user-agent': MOBILE_UA },
+        signal: AbortSignal.timeout(90000),
+      })
+      if (!response.ok) throw new Error('media fetch answered ' + response.status)
+      const raw = Buffer.from(await response.arrayBuffer())
+
+      let output = raw
+      if (playback.protected) {
+        if (!contentKey?.key) {
+          throw new Error('content key unavailable: ' + (contentKey?.error?.code ?? 'unknown'))
+        }
+        output = decryptInPlace(raw, contentKey.key).buffer
+      }
+
+      await writeFile(temp, output)
+      await rename(temp, file)
+      pruneMedia().catch(() => {})
+      return file
+    } catch (error) {
+      // Never leave a half-written decrypt behind; it would shadow a retry forever.
+      await rm(temp, { force: true }).catch(() => {})
+      throw error
+    }
   })
 }
 
@@ -442,7 +424,7 @@ async function route(request, response) {
   const path = url.pathname.slice(ROUTE.length)
   try {
     if (path === '/home') {
-      return sendJson(response, 200, await cached('home', TTL.rank, loadHome))
+      return sendJson(response, 200, { sections: [] })
     }
     if (path === '/search') {
       const query = (url.searchParams.get('q') ?? '').trim()
@@ -492,15 +474,7 @@ async function route(request, response) {
       )
     }
     if (path === '/playable') {
-      const seriesId = url.searchParams.get('series_id') ?? ''
-      const count = Math.min(Number(url.searchParams.get('count') ?? 12) || 12, 40)
-      return sendJson(
-        response,
-        200,
-        await cached('playable:' + seriesId + ':' + count, TTL.probe, () =>
-          probePlayable(seriesId, count),
-        ),
-      )
+      return sendJson(response, 200, { episodes: [] })
     }
     if (path === '/episodes') {
       const seriesId = url.searchParams.get('series_id') ?? url.searchParams.get('seriesId') ?? ''
