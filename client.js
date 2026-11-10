@@ -149,8 +149,10 @@ window.__ModuleLoader__.load({
 .hg-stage video{display:block;width:100%;max-height:60vh;background:#000;object-fit:contain}
 .hg-lock{font-size:11.5px;line-height:1.55;color:var(--dsw-alias-label-secondary);padding:8px 10px;
   border-radius:9px;background:var(--dsw-alias-bg-layer-2);margin-bottom:6px}
-.hg-playbar{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.hg-playbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
 .hg-playbar .hg-cmeta{flex:1;min-width:0}
+.hg-defsel{height:24px;padding:0 4px;border-radius:7px;border:1px solid var(--dsw-alias-border-l1);
+  background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:11px;cursor:pointer}
 .hg-toggle{height:24px;padding:0 9px;border-radius:12px;border:1px solid var(--dsw-alias-border-l1);
   background:transparent;color:var(--dsw-alias-label-secondary);font-size:11px;cursor:pointer;white-space:nowrap}
 .hg-toggle:hover{color:var(--dsw-alias-label-primary)}
@@ -260,11 +262,16 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function Cover(props) {      const { src, label } = props
+    function Cover(props) {
+      const { src, label } = props
+      // Covers go through the Host proxy so the page never depends on the CDN origin.
+      const proxied = src
+        ? API + '/cover?url=' + encodeURIComponent(src)
+        : null
       return h(
         'div',
         { className: 'hg-cover' },
-        src ? h('img', { src, alt: '', loading: 'lazy', referrerPolicy: 'no-referrer' }) : null,
+        proxied ? h('img', { src: proxied, alt: '', loading: 'lazy' }) : null,
         label ? h('span', { className: 'hg-badge' }, label) : null,
       )
     }
@@ -671,18 +678,57 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** Last chosen definition outlives the panel; default 360p. */
+    const DEFINITION_KEY = 'hongguo-drama:definition'
+
+    function readDefinition() {
+      try {
+        return localStorage.getItem(DEFINITION_KEY) || '360p'
+      } catch {
+        return '360p'
+      }
+    }
+
     function Player(props) {
       const { series, episodes, index, onSelect, onBack, startTime, onProgress } = props
       const [failed, setFailed] = useState(false)
       const [autoNext, setAutoNext] = useState(readAutoNext)
       const [finished, setFinished] = useState(false)
+      const [definition, setDefinition] = useState(readDefinition)
+      const [definitions, setDefinitions] = useState([])
       const episode = episodes[index]
       const hasNext = index + 1 < episodes.length
 
       useEffect(() => {
         setFailed(false)
         setFinished(false)
+      }, [episode?.id, definition])
+
+      useEffect(() => {
+        if (!episode) return
+        let live = true
+        setDefinitions([])
+        getJson('/streams?episode_id=' + episode.id, 60 * 1000)
+          .then((payload) => {
+            if (live) setDefinitions(payload.definitions ?? [])
+          })
+          .catch(() => {})
+        return () => {
+          live = false
+        }
       }, [episode?.id])
+
+      const pickDefinition = useCallback((next) => {
+        setDefinition((current) => {
+          if (current === next) return current
+          try {
+            localStorage.setItem(DEFINITION_KEY, next)
+          } catch {
+            /* Private mode: the choice lasts for this panel only. */
+          }
+          return next
+        })
+      }, [])
 
       const toggleAutoNext = useCallback(() => {
         setAutoNext((value) => {
@@ -753,6 +799,18 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'hg-playbar' },
           h('span', { className: 'hg-cmeta' }, series.title + ' · 第 ' + (index + 1) + ' / ' + episodes.length + ' 集'),
+          definitions.length > 1
+            ? h(
+                'select',
+                {
+                  className: 'hg-defsel',
+                  value: definition,
+                  onChange: (event) => pickDefinition(event.target.value),
+                  title: '清晰度',
+                },
+                definitions.map((def) => h('option', { key: def, value: def }, def)),
+              )
+            : null,
           h(
             'button',
             {
@@ -769,12 +827,12 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'hg-stage' },
           h('video', {
-            key: episode.id,
-            src: API + '/media?episode_id=' + episode.id,
+            key: episode.id + ':' + definition,
+            src: API + '/media?episode_id=' + episode.id + '&definition=' + encodeURIComponent(definition),
             controls: true,
             autoPlay: true,
             playsInline: true,
-            poster: series.cover,
+            poster: API + '/cover?url=' + encodeURIComponent(series.cover),
             onError: () => setFailed(true),
             onEnded: handleEnded,
             onLoadedMetadata: handleLoadedMetadata,

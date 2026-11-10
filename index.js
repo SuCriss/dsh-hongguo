@@ -14,6 +14,7 @@ import { createReadStream } from 'node:fs'
 import { mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 // Vendored so the bundle carries no install-time dependency; see vendor/openhongguo.
 import { createClient } from './vendor/openhongguo/index.js'
 import { decryptInPlace } from './cenc.js'
@@ -109,7 +110,9 @@ const MOBILE_UA =
 
 const DATA_DIR = join(homedir(), '.dsh', 'hongguo-drama')
 const MEDIA_DIR = join(DATA_DIR, 'media')
+const COVER_DIR = join(DATA_DIR, 'covers')
 const MEDIA_KEEP = 40
+const COVER_KEEP = 800
 
 const CACHE_LIMIT = 240
 const cache = new Map()
@@ -342,6 +345,78 @@ function pickStream(streams, definition) {
   )
 }
 
+/** The definitions the SDK exposes for one episode, best first for a sidebar. */
+function listDefinitions(streams) {
+  const seen = []
+  const priority = ['360p', '480p', '720p', '1080p']
+  const rest = streams.filter((s) => !priority.includes(s.definition))
+  for (const def of [...priority, ...rest.map((s) => s.definition)]) {
+    const stream = streams.find((s) => s.definition === def)
+    if (stream && !seen.includes(def)) seen.push(def)
+  }
+  return seen
+}
+
+/** A deterministic cache name for one cover URL; keeps the panel on same-origin URLs. */
+function coverPathOf(rawUrl) {
+  const digest = createHash('sha1').update(String(rawUrl)).digest('hex').slice(0, 16)
+  return join(COVER_DIR, digest)
+}
+
+/** Cache one cover image locally and return its path plus the upstream content type. */
+async function ensureCover(rawUrl) {
+  if (!/^https:\/\//.test(String(rawUrl ?? ''))) throw new Error('bad cover url')
+  const file = coverPathOf(rawUrl)
+  const existing = await stat(file).catch(() => null)
+  if (existing && existing.size > 0) return { file, contentType: guessCoverType(rawUrl) }
+
+  return cached('cover:' + rawUrl, 60 * 60 * 1000, async () => {
+    await mkdir(COVER_DIR, { recursive: true })
+    const response = await fetch(rawUrl, {
+      headers: { 'user-agent': UA, referer: ORIGIN + '/' },
+      signal: AbortSignal.timeout(20000),
+    })
+    if (!response.ok) throw new Error('cover fetch answered ' + response.status)
+    const bytes = Buffer.from(await response.arrayBuffer())
+    const contentType = response.headers.get('content-type') || guessCoverType(rawUrl)
+    const temp = file + '.part'
+    try {
+      await writeFile(temp, bytes)
+      await rename(temp, file)
+      pruneCovers().catch(() => {})
+      return { file, contentType }
+    } catch (error) {
+      await rm(temp, { force: true }).catch(() => {})
+      throw error
+    }
+  })
+}
+
+/** The site serves cover images without a reliable suffix; fall back on the URL. */
+function guessCoverType(rawUrl) {
+  if (/\.(png|webp)(\?|$)/i.test(rawUrl)) return 'image/' + (/\.png/i.test(rawUrl) ? 'png' : 'webp')
+  return 'image/jpeg'
+}
+
+/** Keep the newest N cover images and drop the rest. */
+async function pruneCovers() {
+  try {
+    const names = await readdir(COVER_DIR)
+    if (names.length <= COVER_KEEP) return
+    const entries = []
+    for (const name of names) {
+      const info = await stat(join(COVER_DIR, name)).catch(() => null)
+      if (info) entries.push({ name, at: info.mtimeMs })
+    }
+    entries.sort((a, b) => b.at - a.at)
+    for (const entry of entries.slice(COVER_KEEP)) {
+      await rm(join(COVER_DIR, entry.name), { force: true }).catch(() => {})
+    }
+  } catch {
+    /* Nothing cached yet. */
+  }
+}
+
 /** Keep the newest N decrypted episodes and drop the rest. */
 async function pruneMedia() {
   try {
@@ -366,18 +441,20 @@ async function pruneMedia() {
  * Produce one decrypted, playable MP4 for an episode and return its path.
  * The content key stays in this process; the page only ever sees this Host's URL.
  */
-async function ensureMedia(episodeId) {
+async function ensureMedia(episodeId, definition) {
   if (!/^[0-9]{1,32}$/.test(String(episodeId))) throw new Error('bad episode id')
-  const file = join(MEDIA_DIR, episodeId + '.mp4')
+  const def = typeof definition === 'string' && definition !== '' ? definition : '360p'
+  if (!/^[0-9]{3,4}p$/.test(def)) throw new Error('bad definition ' + def)
+  const file = join(MEDIA_DIR, episodeId + '-' + def + '.mp4')
   const existing = await stat(file).catch(() => null)
   if (existing && existing.size > 1024) return file
 
-  return cached('media:' + episodeId, 30 * 60 * 1000, async () => {
+  return cached('media:' + episodeId + ':' + def, 30 * 60 * 1000, async () => {
     await mkdir(MEDIA_DIR, { recursive: true })
     const temp = file + '.part'
     try {
       const { playback, contentKey } = await retryResolve(episodeId)
-      const stream = pickStream(playback.streams, '360p')
+      const stream = pickStream(playback.streams, def)
       const response = await fetch(stream.url, {
         headers: { 'user-agent': MOBILE_UA },
         signal: AbortSignal.timeout(90000),
@@ -403,6 +480,13 @@ async function ensureMedia(episodeId) {
       throw error
     }
   })
+}
+
+/** The definitions the SDK exposes for one episode. */
+async function loadStreams(episodeId) {
+  if (!/^[0-9]{1,32}$/.test(String(episodeId))) throw new Error('bad episode id')
+  const { playback } = await retryResolve(episodeId)
+  return { definitions: listDefinitions(playback.streams ?? []) }
 }
 
 /** Every episode of a series, with the ids the player needs. */
@@ -486,7 +570,8 @@ async function route(request, response) {
     }
     if (path === '/media') {
       const episodeId = url.searchParams.get('episode_id') ?? url.searchParams.get('episodeId') ?? ''
-      const file = await ensureMedia(episodeId)
+      const definition = url.searchParams.get('definition') ?? ''
+      const file = await ensureMedia(episodeId, definition)
       const info = await stat(file)
       const range = request.headers.range
       const headers = {
@@ -512,6 +597,22 @@ async function route(request, response) {
         return
       }
       response.writeHead(200, { ...headers, 'content-length': info.size })
+      createReadStream(file).pipe(response)
+      return
+    }
+    if (path === '/streams') {
+      const episodeId = url.searchParams.get('episode_id') ?? url.searchParams.get('episodeId') ?? ''
+      return sendJson(response, 200, await loadStreams(episodeId))
+    }
+    if (path === '/cover') {
+      const rawUrl = url.searchParams.get('url') ?? ''
+      const { file, contentType } = await ensureCover(rawUrl)
+      const info = await stat(file)
+      response.writeHead(200, {
+        'content-type': contentType,
+        'cache-control': 'private, max-age=86400',
+        'content-length': info.size,
+      })
       createReadStream(file).pipe(response)
       return
     }
