@@ -74,3 +74,12 @@ Host 侧另有两层内存缓存：接口结果 5–10 分钟，前端 90 秒，
 ## 免责声明
 
 本项目仅供学习与研究，不提供、不分发任何视频内容，也不绕过任何付费机制。所有请求以匿名设备身份发往官方服务，内容版权归权利人所有。请勿用于商业用途。
+## vendor/openhongguo 的版本来源
+
+2026-11-10 起红果播放接口 POST /novel/player/video_model/v1/ 开始校验真实的
+x-argus / x-ladon 签名，旧版 SDK 的占位签名会被回 200 空响应（表现为
+openhongguo: anonymous response was empty，所有新注册的匿名设备都拿不到片源）。
+
+endor/openhongguo 因此改为用 openhongguo 仓库 main（含 PR #7 ix: 播放接口补上真正的
+Argus/Ladon 签名）在本地用 Go 1.27.4 重建的产物：dist/openhongguo.wasm 7,017,244 B。
+npm 上最新的 0.2.0（2026-11-04）仍早于此修复。

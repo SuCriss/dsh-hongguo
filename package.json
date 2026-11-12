@@ -1,6 +1,6 @@
 {
   "name": "hongguo-drama",
-  "version": "2.4.2",
+  "version": "2.4.3",
   "private": true,
   "type": "module",
   "description": "红果短剧：左侧栏入口，右侧栏看热播榜、浏览片库并播放全部集数（本地解密、多清晰度、封面走代理）。",
